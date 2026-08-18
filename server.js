@@ -1,0 +1,1029 @@
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+
+const PORT = 3000;
+const SITE_PER_PAGE = 20;
+
+
+
+/*
+ * =====================================================
+ * ARCHITECTURE
+ * =====================================================
+ *
+ * Steam is never fetched live on the request path
+ * anymore. Instead:
+ *
+ * 1. A background crawler periodically walks Steam's
+ *    discount listings for every supported region and
+ *    writes the full result set to a JSON file on disk
+ *    (and an in-memory cache).
+ *
+ * 2. /api/steam just reads from that cache: filters by
+ *    search term, sorts, and slices out a page. All in
+ *    memory, no network call, so pagination can go as
+ *    deep as the data actually has — no more "last
+ *    reachable page" ceiling, no more rate-limit risk
+ *    from bursts of live requests.
+ *
+ * This is the same shape of approach sites like SteamDB
+ * use: crawl once in the background, serve many times
+ * from storage.
+ *
+ * Trade-off: results are "as fresh as the last crawl"
+ * (a few minutes old) rather than truly live per click.
+ */
+
+const DATA_DIR = path.join(__dirname, "data");
+
+const CSS_DIR = path.join(__dirname, "css");
+
+const JS_DIR = path.join(__dirname, "js");
+
+
+/*
+ * Single-region app now — Philippines only. This removes
+ * the multi-region crawl loop, per-region stagger delay,
+ * and cc query-param resolution entirely.
+ */
+const STEAM_CC = "ph";
+
+function sleep(ms) {
+  return new Promise(
+    resolve => setTimeout(resolve, ms)
+  );
+}
+
+function decodeHtml(str = "") {
+  return str
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#(\d+);/g, (_, n) =>
+      String.fromCharCode(Number(n))
+    );
+}
+
+function parsePrice(str = "") {
+  const cleaned = str
+    .replace(/[^\d.,]/g, "")
+    .replace(/,/g, "");
+
+  const value = parseFloat(cleaned);
+
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.round(value * 100);
+}
+
+/*
+ * Parses any chunk of HTML containing Steam
+ * "search_result_row" anchors — works equally well on a
+ * full rendered search page OR on the results_html
+ * fragment returned by Steam's AJAX search endpoint.
+ */
+function parseSteamResults(html) {
+  const deals = [];
+
+  const rowRegex =
+    /<a\b[^>]*class="[^"]*\bsearch_result_row\b[^"]*"[^>]*>[\s\S]*?<\/a>/gi;
+
+  const rows = html.match(rowRegex) || [];
+
+  for (const row of rows) {
+
+    const idMatch =
+      row.match(/data-ds-appid="([^"]+)"/i);
+
+    if (!idMatch) continue;
+
+    const id = Number(
+      idMatch[1].split(",")[0]
+    );
+
+    if (!id) continue;
+
+    const nameMatch =
+      row.match(
+        /<span[^>]*class="[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i
+      );
+
+    if (!nameMatch) continue;
+
+    const name = decodeHtml(
+      nameMatch[1]
+        .replace(/<[^>]+>/g, "")
+        .trim()
+    );
+
+    const imageMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bsearch_capsule\b[^"]*"[^>]*>\s*<img[^>]+src="([^"]+)"/i
+      );
+
+    const image = imageMatch
+      ? decodeHtml(imageMatch[1])
+      : "";
+
+    const discountMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_block\b[^"]*"[^>]*data-discount="(\d+)"/i
+      );
+
+    const discountPercent =
+      discountMatch
+        ? Number(discountMatch[1])
+        : 0;
+
+    const originalMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_original_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+      );
+
+    const originalPrice =
+      parsePrice(
+        originalMatch
+          ? decodeHtml(originalMatch[1])
+          : ""
+      );
+
+    const finalMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_final_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+      );
+
+    const finalPrice =
+      parsePrice(
+        finalMatch
+          ? decodeHtml(finalMatch[1])
+          : ""
+      );
+
+    const urlMatch =
+      row.match(/<a\b[^>]*href="([^"]+)"/i);
+
+    const url =
+      urlMatch
+        ? decodeHtml(urlMatch[1])
+        : `https://store.steampowered.com/app/${id}`;
+
+    deals.push({
+      id,
+      name,
+      discount_percent: discountPercent,
+      original_price: originalPrice,
+      final_price: finalPrice,
+      large_capsule_image: image,
+      header_image: image,
+      small_capsule_image: image,
+      url,
+    });
+  }
+
+  return {
+    deals,
+    rawRowCount: rows.length,
+  };
+}
+
+function parseSteamDescription(html) {
+
+  const gameDescription = [];
+
+  const rowRegex =
+    /<a\b[^>]*class="[^"]*\bsearch_result_row\b[^"]*"[^>]*>[\s\S]*?<\/a>/gi;
+
+  const rows = html.match(rowRegex) || [];
+
+  for (const row of rows) {
+
+    const idMatch =
+      row.match(/data-ds-appid="([^"]+)"/i);
+
+
+    if (!id) continue;
+
+    const nameMatch =
+      row.match(
+        /<span[^>]*class="[^"]*\btitle\b[^"]*"[^>]*>([\s\S]*?)<\/span>/i
+      );
+
+    if (!nameMatch) continue;
+
+    const name = decodeHtml(
+      nameMatch[1]
+        .replace(/<[^>]+>/g, "")
+        .trim()
+    );
+
+    const imageMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bsearch_capsule\b[^"]*"[^>]*>\s*<img[^>]+src="([^"]+)"/i
+      );
+
+    const image = imageMatch
+      ? decodeHtml(imageMatch[1])
+      : "";
+
+    const discountMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_block\b[^"]*"[^>]*data-discount="(\d+)"/i
+      );
+
+    const discountPercent =
+      discountMatch
+        ? Number(discountMatch[1])
+        : 0;
+
+    const originalMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_original_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+      );
+
+    const originalPrice =
+      parsePrice(
+        originalMatch
+          ? decodeHtml(originalMatch[1])
+          : ""
+      );
+
+    const finalMatch =
+      row.match(
+        /<div[^>]*class="[^"]*\bdiscount_final_price\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+      );
+
+    const finalPrice =
+      parsePrice(
+        finalMatch
+          ? decodeHtml(finalMatch[1])
+          : ""
+      );
+
+    const urlMatch =
+      row.match(/<a\b[^>]*href="([^"]+)"/i);
+
+    const url =
+      urlMatch
+        ? decodeHtml(urlMatch[1])
+        : `https://store.steampowered.com/app/${id}`;
+
+    deals.push({
+      id,
+      name,
+      discount_percent: discountPercent,
+      original_price: originalPrice,
+      final_price: finalPrice,
+      large_capsule_image: image,
+      header_image: image,
+      small_capsule_image: image,
+      url,
+    });
+  }
+
+  return {
+    deals,
+    rawRowCount: rows.length,
+  };
+
+}
+
+function getTotalResults(html) {
+  const patterns = [
+    /([\d,]+)\s+results match your search/i,
+    /([\d,]+)\s+results/i,
+  ];
+
+  for (const regex of patterns) {
+    const match = html.match(regex);
+
+    if (match) {
+      return Number(
+        match[1].replace(/,/g, "")
+      );
+    }
+  }
+
+  return 0;
+}
+
+const STEAM_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140 Safari/537.36",
+  "Accept":
+    "text/html,application/xhtml+xml",
+  "Accept-Language":
+    "en-US,en;q=0.9",
+  "Referer":
+    "https://store.steampowered.com/",
+};
+
+async function steamFetch(url) {
+  const response = await fetch(url, {
+    headers: STEAM_HEADERS,
+  });
+
+  if (!response.ok) {
+    const error = new Error(
+      `Steam returned HTTP ${response.status}`
+    );
+    error.status = response.status;
+    error.retryAfter =
+      response.headers.get("retry-after");
+    throw error;
+  }
+
+  return response;
+}
+
+/*
+ * =====================================================
+ * CRAWLER
+ * =====================================================
+ */
+
+/*
+ * Preferred path: Steam's own AJAX search endpoint (the
+ * one the store page itself calls for infinite scroll).
+ * Supports direct offset/count and returns an exact
+ * total_count for the filtered query.
+ *
+ * NOTE: this is not a documented/official Steam API — it
+ * was found via community reverse-engineering of the
+ * storefront's own network calls. It could change or
+ * break without notice, which is exactly why the crawler
+ * below falls back to full-page scraping if this stops
+ * working, rather than the whole app depending on it.
+ */
+async function fetchSteamSearchJsonPage({
+  cc,
+  start,
+  count,
+}) {
+
+  const params = new URLSearchParams();
+
+  params.set("query", "");
+  params.set("start", String(start));
+  params.set("count", String(count));
+  params.set("sort_by", "_ASC");
+  params.set("sort_by", "_DESC");
+  params.set("specials", "1");
+  params.set("infinite", "1");
+  params.set("json", "1");
+  params.set("cc", cc);
+  params.set("l", "english");
+
+  const url =
+    `https://store.steampowered.com/search/results/?${params.toString()}`;
+
+  const response = await steamFetch(url);
+  const json = await response.json();
+
+  if (typeof json.results_html !== "string") {
+    throw new Error(
+      "Unexpected response shape from Steam search AJAX endpoint"
+    );
+  }
+
+  const { deals, rawRowCount } =
+    parseSteamResults(json.results_html);
+
+  return {
+    rawDeals: deals,
+    rawRowCount,
+    steamTotal: Number(json.total_count) || 0,
+  };
+}
+
+/*
+ * Fallback path: scrape the full rendered search page,
+ * same as the original approach. Used only if the AJAX
+ * JSON endpoint fails on the very first page of a crawl.
+ */
+async function fetchSteamFullPage({
+  cc,
+  page,
+}) {
+
+  const params = new URLSearchParams();
+
+  params.set("cc", cc);
+  params.set("l", "english");
+  params.set("specials", "1");
+  params.set("page", String(page));
+  params.set("sort_by", "_ASC");
+
+  const url =
+    `https://store.steampowered.com/search/?${params.toString()}`;
+
+  const response = await steamFetch(url);
+  const html = await response.text();
+
+  const { deals, rawRowCount } =
+    parseSteamResults(html);
+
+  return {
+    rawDeals: deals,
+    rawRowCount,
+    steamTotal: getTotalResults(html),
+  };
+}
+
+const CRAWL_PAGE_SIZE = 100;
+const CRAWL_FETCH_DELAY_MS = 3000;
+
+/*
+ * A 429 from Steam means the IP is being rate limited —
+ * that applies to every region and every endpoint, not
+ * just the one request that got it. Rather than let each
+ * region's crawl independently keep hammering Steam (and
+ * making the block worse/longer), a 429 anywhere pauses
+ * ALL crawling until this cooldown expires.
+ */
+const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+let steamCooldownUntil = 0;
+
+function isInCooldown() {
+  return Date.now() < steamCooldownUntil;
+}
+
+function enterCooldown(retryAfterHeader) {
+
+  let ms = DEFAULT_COOLDOWN_MS;
+
+  if (retryAfterHeader) {
+
+    const asSeconds = Number(retryAfterHeader);
+
+    if (Number.isFinite(asSeconds)) {
+      ms = Math.max(
+        asSeconds * 1000,
+        DEFAULT_COOLDOWN_MS
+      );
+    } else {
+      const asDate = Date.parse(retryAfterHeader);
+      if (!Number.isNaN(asDate)) {
+        ms = Math.max(
+          asDate - Date.now(),
+          DEFAULT_COOLDOWN_MS
+        );
+      }
+    }
+  }
+
+  const until = Date.now() + ms;
+
+  if (until > steamCooldownUntil) {
+    steamCooldownUntil = until;
+    console.warn(
+      `[crawl] rate limited (429) — pausing ALL crawling `
+      + `until ${new Date(until).toISOString()} `
+      + `(${Math.round(ms / 1000)}s)`
+    );
+  }
+}
+
+/*
+ * Crawls one region's full set of discounted listings in
+ * the background and returns the accumulated result. Does
+ * NOT touch the shared cache directly — the caller decides
+ * whether/how to store it, so a failed or empty crawl can
+ * never clobber a previously-good cache.
+ *
+ * No artificial page/row cap — this runs in the
+ * background on a timer, not on the request path, so
+ * there's no need to bound how deep it goes. It stops
+ * purely on natural signals from Steam: reaching its
+ * reported total_count, or getting a page back with zero
+ * rows.
+ */
+async function crawlRegion(cc) {
+
+  let accumulated = [];
+  let steamTotal = 0;
+  let start = 0;
+  let useJson = true;
+  let page = 1; // only used by the full-page fallback
+  let complete = false;
+
+  console.log(`[crawl] starting ${cc}`);
+
+  while (true) {
+
+    let pageResult;
+
+    try {
+
+      pageResult = useJson
+        ? await fetchSteamSearchJsonPage({
+            cc,
+            start,
+            count: CRAWL_PAGE_SIZE,
+          })
+        : await fetchSteamFullPage({ cc, page });
+
+    } catch (error) {
+
+      if (error.status === 429) {
+        // Rate limited. Don't bother with the full-page
+        // fallback — same IP, same block, it would just
+        // fail too. Stop immediately and pause ALL
+        // crawling, not just this region.
+        enterCooldown(error.retryAfter);
+        console.warn(
+          `[crawl] ${cc}: rate limited, stopping crawl `
+          + `(had ${accumulated.length} deals so far)`
+        );
+        complete = false;
+        break;
+      }
+
+      if (useJson && start === 0) {
+        // JSON endpoint failed right out of the gate —
+        // fall back to full-page scraping for this whole
+        // crawl instead of giving up entirely.
+        console.warn(
+          `[crawl] ${cc}: AJAX JSON endpoint failed `
+          + `(${error.message}), falling back to full-page scrape`
+        );
+        useJson = false;
+        continue;
+      }
+
+      // Failed partway through — stop here and keep
+      // whatever we've already gathered this cycle, but
+      // mark it clearly as INCOMPLETE. This is not the
+      // same as reaching the real end of the results.
+      console.warn(
+        `[crawl] ${cc}: stopping EARLY (incomplete) after `
+        + `failure (${error.message}) — accumulated `
+        + `${accumulated.length} deals so far, Steam `
+        + `reported ${steamTotal} total matching`
+      );
+      complete = false;
+      break;
+    }
+
+    const { rawDeals, rawRowCount, steamTotal: pageTotal } =
+      pageResult;
+
+    if (start === 0 && page === 1) {
+      steamTotal = pageTotal;
+    }
+
+    const filtered = rawDeals.filter(
+      deal => deal.discount_percent > 0
+    );
+
+    accumulated = accumulated.concat(filtered);
+
+    if (rawRowCount === 0) {
+      complete = true;
+      break; // genuinely out of results
+    }
+
+    if (useJson) {
+      start += CRAWL_PAGE_SIZE;
+      if (steamTotal > 0 && start >= steamTotal) {
+        complete = true;
+        break;
+      }
+    } else {
+      page += 1;
+      if (rawRowCount < CRAWL_PAGE_SIZE) {
+        complete = true;
+        break;
+      }
+    }
+
+    await sleep(CRAWL_FETCH_DELAY_MS);
+  }
+
+  console.log(
+    `[crawl] ${cc}: ${complete ? "done" : "STOPPED INCOMPLETE"}, `
+    + `${accumulated.length} discounted deals `
+    + `(steamTotal reported: ${steamTotal})`
+  );
+
+  return {
+    deals: accumulated,
+    steamTotal,
+    complete,
+    updatedAt: Date.now(),
+  };
+}
+
+/*
+ * =====================================================
+ * CACHE (in-memory + JSON files on disk)
+ * =====================================================
+ */
+
+const regionCache = new Map();       // cc -> { deals, steamTotal, updatedAt }
+const inFlightCrawls = new Map();    // cc -> Promise, dedupes concurrent crawls
+
+function cacheFilePath(cc) {
+  return path.join(DATA_DIR, `deals-${cc}.json`);
+}
+
+function loadRegionCacheFromDisk(cc) {
+  try {
+    const raw = fs.readFileSync(
+      cacheFilePath(cc),
+      "utf8"
+    );
+
+    const data = JSON.parse(raw);
+
+    if (Array.isArray(data.deals)) {
+      regionCache.set(cc, data);
+      console.log(
+        `[cache] loaded ${cc} from disk `
+        + `(${data.deals.length} deals, `
+        + `updated ${new Date(data.updatedAt).toISOString()})`
+      );
+    }
+
+  } catch (error) {
+    // No cache file yet, or it's corrupt — fine, a crawl
+    // will populate it.
+  }
+}
+
+function saveRegionCacheToDisk(cc, data) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+
+    fs.writeFileSync(
+      cacheFilePath(cc),
+      JSON.stringify(data)
+    );
+
+  } catch (error) {
+    console.error(
+      `[cache] failed to write disk cache for ${cc}: `
+      + error.message
+    );
+  }
+}
+
+/*
+ * Runs (or joins an in-progress) crawl for a region, and
+ * updates the cache on success. Never overwrites a good
+ * cache with an empty/failed result.
+ */
+async function refreshRegion(cc) {
+
+  if (isInCooldown()) {
+    console.log(
+      `[crawl] skipping ${cc} — rate-limit cooldown `
+      + `active until ${new Date(steamCooldownUntil).toISOString()}`
+    );
+    return;
+  }
+
+  if (inFlightCrawls.has(cc)) {
+    return inFlightCrawls.get(cc);
+  }
+
+  const crawlPromise = (async () => {
+
+    const result = await crawlRegion(cc);
+
+    if (result.deals.length === 0) {
+      console.warn(
+        `[cache] ${cc}: crawl produced no deals, `
+        + `keeping previous cache if any`
+      );
+      return;
+    }
+
+    regionCache.set(cc, result);
+    saveRegionCacheToDisk(cc, result);
+
+  })().finally(() => {
+    inFlightCrawls.delete(cc);
+  });
+
+  inFlightCrawls.set(cc, crawlPromise);
+
+  return crawlPromise;
+}
+
+/*
+ * Used by the request path. Returns cached data
+ * immediately if we have any (even if stale) — only
+ * blocks on a live crawl the very first time a region is
+ * ever requested with nothing on disk yet.
+ */
+async function getRegionData(cc) {
+
+  if (regionCache.has(cc)) {
+    return regionCache.get(cc);
+  }
+
+  await refreshRegion(cc);
+
+  return regionCache.get(cc) || null;
+}
+
+const RECRAWL_INTERVAL_MS = 10 * 60 * 1000; // 30 minutes
+
+async function refreshPhRegion() {
+  try {
+    await refreshRegion(STEAM_CC);
+  } catch (error) {
+    console.error(
+      `[cache] background refresh of ${STEAM_CC} failed: `
+      + error.message
+    );
+  }
+}
+
+/*
+ * =====================================================
+ * HTTP SERVER
+ * =====================================================
+ */
+
+const server = http.createServer(
+  async (req, res) => {
+
+    if (req.url.startsWith("/api/steam")) {
+
+      try {
+
+        const url = new URL(
+          req.url,
+          `http://localhost:${PORT}`
+        );
+
+        // Single-region app — always PH, regardless of
+        // any ?cc= the client might still send.
+        const cc = STEAM_CC;
+
+        const requestedPage =
+          Math.max(
+            1,
+            Number(
+              url.searchParams.get("page")
+            ) || 1
+          );
+
+        const sort =
+          url.searchParams.get("sort")
+          || "discount";
+
+        const search =
+          url.searchParams
+            .get("search")
+            ?.trim() || "";
+
+        const regionData =
+          await getRegionData(cc);
+
+        if (!regionData) {
+          throw new Error(
+            `No data available for region "${cc}" `
+            + `(initial crawl failed)`
+          );
+        }
+
+        const searchLower =
+          search.toLowerCase();
+
+        let deals = search
+          ? regionData.deals.filter(
+              d =>
+                d.name
+                  .toLowerCase()
+                  .includes(searchLower)
+            )
+          : regionData.deals.slice();
+
+        if (sort === "discount") {
+
+          deals.sort((a, b) => {
+
+            if (
+              b.discount_percent !==
+              a.discount_percent
+            ) {
+              return (
+                b.discount_percent -
+                a.discount_percent
+              );
+            }
+
+            return (
+              a.final_price - b.final_price
+            );
+          });
+
+        } else if (sort === "price-asc") {
+
+          deals.sort(
+            (a, b) =>
+              a.final_price - b.final_price
+          );
+
+        } else if (sort === "price-desc") {
+
+          deals.sort(
+            (b, a) =>
+              a.final_price - b.final_price
+          );
+
+        } else if (sort === "name-asc") {
+
+          deals.sort((a, b) =>
+            a.name.localeCompare(b.name)
+          );
+        } else if (sort === "name-desc") {
+
+          deals.sort((b, a) =>
+            a.name.localeCompare(b.name)
+          );
+        } 
+
+        const total = deals.length;
+
+        const total_pages =
+          total > 0
+            ? Math.ceil(total / SITE_PER_PAGE)
+            : 1;
+
+        const globalStart =
+          (requestedPage - 1) * SITE_PER_PAGE;
+
+        const pageDeals = deals.slice(
+          globalStart,
+          globalStart + SITE_PER_PAGE
+        );
+
+        const result = {
+          page: requestedPage,
+          per_page: SITE_PER_PAGE,
+          total,
+          total_pages,
+          cc,
+          sort,
+          search,
+          updated_at: new Date(
+            regionData.updatedAt
+          ).toISOString(),
+
+          // False if the background crawl that produced
+          // this cache stopped early due to a fetch
+          // failure partway through — meaning `total`
+          // may be an UNDERCOUNT of what's actually on
+          // sale right now, not the true full picture.
+          data_complete:
+            regionData.complete !== false,
+
+          deals: pageDeals,
+        };
+
+        res.writeHead(200, {
+          "Content-Type":
+            "application/json; charset=utf-8",
+          "Cache-Control": "no-store",
+          "Access-Control-Allow-Origin": "*",
+        });
+
+        res.end(JSON.stringify(result));
+
+      } catch (error) {
+
+        console.error(
+          "Steam API error:",
+          error
+        );
+
+        res.writeHead(502, {
+          "Content-Type":
+            "application/json; charset=utf-8",
+          "Access-Control-Allow-Origin": "*",
+        });
+
+        res.end(
+          JSON.stringify({
+            error: "Steam request failed",
+            message: error.message,
+          })
+        );
+      }
+
+      return;
+    }
+
+    if (
+      req.url === "/" ||
+      req.url === "/index.html"
+    ) {
+
+      try {
+
+        const file = fs.readFileSync(
+          path.join(__dirname, "index.html")
+        );
+
+        res.writeHead(200, {
+          "Content-Type":
+            "text/html; charset=utf-8",
+        });
+
+        res.end(file);
+
+      } catch (error) {
+
+        console.error(error);
+        res.writeHead(500);
+        res.end("Could not load index.html");
+      }
+
+      return;
+    }
+
+    if (req.url === "/css/style.css") {
+  const cssPath = path.join(CSS_DIR, "style.css");
+
+  fs.readFile(cssPath, "utf8", (err, css) => {
+    if (err) {
+      res.writeHead(404, {
+        "Content-Type": "text/plain"
+      });
+
+      res.end("CSS file not found");
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/css"
+    });
+
+    res.end(css);
+  });
+
+  return;
+}
+
+if (req.url === "/js/main.compat.js") {
+  const jsPath = path.join(JS_DIR, "main.compat.js");
+
+  fs.readFile(jsPath, "utf8", (err, js) => {
+    if (err) {
+      res.writeHead(404, {
+        "Content-Type": "text/plain"
+      });
+
+      res.end("JS file not found");
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "application/javascript"
+    });
+
+    res.end(js);
+
+  });
+
+  return;
+
+  }
+
+
+    res.writeHead(404);
+    res.end("Not found");
+  }
+);
+
+/*
+ * =====================================================
+ * STARTUP
+ * =====================================================
+ */
+
+fs.mkdirSync(DATA_DIR, { recursive: true });
+
+loadRegionCacheFromDisk(STEAM_CC);
+
+server.listen(PORT, () => {
+  console.log(
+    `DISCOUNT FLOOR running at http://localhost:${PORT}`
+  );
+});
+
+// Kick off a background crawl on startup (doesn't block
+// the server from accepting requests — getRegionData()
+// will crawl on-demand if requested before this finishes),
+// then keep refreshing on a timer.
+refreshPhRegion();
+
+setInterval(refreshPhRegion, RECRAWL_INTERVAL_MS);

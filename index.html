@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DISCOUNT FLOOR — Live Steam Deals</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<script src="js/main.compat.js" defer></script>
+</head>
+
+<body>
+
+<div class="ticker-wrap">
+  <div class="ticker-track" id="tickerTrack">
+    <span class="tick"><span class="pct">···</span> loading market feed</span>
+  </div>
+</div>
+ 
+<header>
+  <div class="eyebrow"><span class="dot"></span>STEAM STOREFRONT</div>
+  <h1>STEAM PH  <span class="thin">Discount</span></h1>
+  <p class="sub">List of Discounted Steam Games</p>
+</header>
+ 
+<div class="controls">
+  <input type="text" id="searchBox" placeholder="Search titles…" />
+
+  <select id="sortSelect">
+    <option value="discount">Sort: Biggest discount</option>
+    <option value="price-asc">Sort: Price, low → high</option>
+    <option value="price-desc">Sort: Price, high → low</option>
+    <option value="name-asc">Sort: Name, A → Z</option>
+    <option value="name-desc">Sort: Name, Z → A</option>
+  </select>
+  
+  <span class="stat-pill" id="countPill">— deals</span>
+</div>
+ 
+<main>
+  <div id="content">
+    <div class="grid" id="skeletonGrid"></div>
+  </div>
+</main>
+ 
+<footer>
+  <span class="disclaimer">Not affiliated with Valve.</span>
+</footer>
+
+ <!-- By Ker Pagaduan-->
+
+</body>
+</html>
