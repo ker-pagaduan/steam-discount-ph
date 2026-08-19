@@ -20,6 +20,7 @@
     "core-js": "^3.50.0"
   },
   "dependencies": {
+    "dotenv": "^17.4.2",
     "regenerator-runtime": "^0.14.1"
   }
 }

@@ -1,3 +1,7 @@
+require('dotenv').config();
+const { loadRegionCacheFromKV, saveRegionCacheToKV, regionCache, inFlightCrawls } = require('./js/cache.js');
+
+
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -5,49 +9,16 @@ const path = require("path");
 const PORT = process.env.PORT || 3000;
 const SITE_PER_PAGE = 20;
 
-
-
 /*
- * =====================================================
- * ARCHITECTURE
- * =====================================================
- *
- * Steam is never fetched live on the request path
- * anymore. Instead:
- *
- * 1. A background crawler periodically walks Steam's
- *    discount listings for every supported region and
- *    writes the full result set to a JSON file on disk
- *    (and an in-memory cache).
- *
- * 2. /api/steam just reads from that cache: filters by
- *    search term, sorts, and slices out a page. All in
- *    memory, no network call, so pagination can go as
- *    deep as the data actually has — no more "last
- *    reachable page" ceiling, no more rate-limit risk
- *    from bursts of live requests.
- *
- * This is the same shape of approach sites like SteamDB
- * use: crawl once in the background, serve many times
- * from storage.
- *
- * Trade-off: results are "as fresh as the last crawl"
- * (a few minutes old) rather than truly live per click.
+ * Periodically scrape and crawl steam api
  */
-
-const DATA_DIR = path.join(__dirname, "data");
 
 const CSS_DIR = path.join(__dirname, "css");
-
 const JS_DIR = path.join(__dirname, "js");
 
-
-/*
- * Single-region app now — Philippines only. This removes
- * the multi-region crawl loop, per-region stagger delay,
- * and cc query-param resolution entirely.
- */
 const STEAM_CC = "ph";
+
+
 
 function sleep(ms) {
   return new Promise(
@@ -581,6 +552,7 @@ async function crawlRegion(cc) {
     );
 
     accumulated = accumulated.concat(filtered);
+    console.log(`[crawl] ph: page fetched, ${accumulated.length} deals so far (steamTotal: ${steamTotal})`);
 
     if (rawRowCount === 0) {
       complete = true;
@@ -619,60 +591,6 @@ async function crawlRegion(cc) {
 }
 
 /*
- * =====================================================
- * CACHE (in-memory + JSON files on disk)
- * =====================================================
- */
-
-const regionCache = new Map();       // cc -> { deals, steamTotal, updatedAt }
-const inFlightCrawls = new Map();    // cc -> Promise, dedupes concurrent crawls
-
-function cacheFilePath(cc) {
-  return path.join(DATA_DIR, `deals-${cc}.json`);
-}
-
-function loadRegionCacheFromDisk(cc) {
-  try {
-    const raw = fs.readFileSync(
-      cacheFilePath(cc),
-      "utf8"
-    );
-
-    const data = JSON.parse(raw);
-
-    if (Array.isArray(data.deals)) {
-      regionCache.set(cc, data);
-      console.log(
-        `[cache] loaded ${cc} from disk `
-        + `(${data.deals.length} deals, `
-        + `updated ${new Date(data.updatedAt).toISOString()})`
-      );
-    }
-
-  } catch (error) {
-    // No cache file yet, or it's corrupt — fine, a crawl
-    // will populate it.
-  }
-}
-
-function saveRegionCacheToDisk(cc, data) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-
-    fs.writeFileSync(
-      cacheFilePath(cc),
-      JSON.stringify(data)
-    );
-
-  } catch (error) {
-    console.error(
-      `[cache] failed to write disk cache for ${cc}: `
-      + error.message
-    );
-  }
-}
-
-/*
  * Runs (or joins an in-progress) crawl for a region, and
  * updates the cache on success. Never overwrites a good
  * cache with an empty/failed result.
@@ -704,7 +622,7 @@ async function refreshRegion(cc) {
     }
 
     regionCache.set(cc, result);
-    saveRegionCacheToDisk(cc, result);
+    await saveRegionCacheToKV(cc, result);
 
   })().finally(() => {
     inFlightCrawls.delete(cc);
@@ -1010,20 +928,15 @@ if (req.url === "/js/main.compat.js") {
  * =====================================================
  */
 
-fs.mkdirSync(DATA_DIR, { recursive: true });
+require('dotenv').config();
 
-loadRegionCacheFromDisk(STEAM_CC);
-
-server.listen(PORT, () => {
-  console.log(
-    `DISCOUNT FLOOR running at http://localhost:${PORT}`
-  );
-});
-
-// Kick off a background crawl on startup (doesn't block
-// the server from accepting requests — getRegionData()
-// will crawl on-demand if requested before this finishes),
-// then keep refreshing on a timer.
-refreshPhRegion();
-
-setInterval(refreshPhRegion, RECRAWL_INTERVAL_MS);
+(async () => {
+  await loadRegionCacheFromKV(STEAM_CC);
+  server.listen(PORT, () => {
+    console.log(
+      `DISCOUNT FLOOR running at http://localhost:${PORT}`
+    );
+  });
+  refreshPhRegion();
+  setInterval(refreshPhRegion, RECRAWL_INTERVAL_MS);
+})();
