@@ -5,7 +5,7 @@ let totalDeals = 0;
 const PER_PAGE = 20;
 function money(cents, currencySymbol) {
   if (cents === 0) return "FREE";
-  return currencySymbol + Math.round(cents * 100) / 100;
+  return currencySymbol + (Math.round(cents) / 100).toFixed(2);
 }
 const CURRENCY_SYMBOL = "₱";
 function escapeHtml(str) {
