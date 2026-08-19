@@ -24,41 +24,6 @@ html,body{
 
 ::selection{ background: var(--red); color:#fff; }
 
-/* ---------- Ticker ---------- */
-.ticker-wrap{
-  background: var(--bg-raised);
-  border-bottom: 1px solid var(--line);
-  overflow: hidden;
-  white-space: nowrap;
-  position: relative;
-}
-.ticker-wrap::before, .ticker-wrap::after{
-  content:"";
-  position:absolute; top:0; bottom:0; width:40px; z-index:2;
-}
-.ticker-wrap::before{ left:0; background:linear-gradient(90deg, var(--bg-raised), transparent); }
-.ticker-wrap::after{ right:0; background:linear-gradient(270deg, var(--bg-raised), transparent); }
-.ticker-track{
-  display:inline-flex;
-  animation: scroll-left 45s linear infinite;
-  padding: 9px 0;
-}
-.ticker-wrap:hover .ticker-track{ animation-play-state: paused; }
-@keyframes scroll-left{
-  from{ transform: translateX(0); }
-  to{ transform: translateX(-50%); }
-}
-.tick{
-  display:inline-flex; align-items:center; gap:8px;
-  font-family:'JetBrains Mono', monospace;
-  font-size:12.5px;
-  padding: 0 22px;
-  border-right: 1px solid var(--line);
-  color: var(--text-dim);
-}
-.tick b{ color: var(--text); font-weight:500; }
-.tick .pct{ color: var(--red); font-weight:700; }
-
 /* ---------- Header ---------- */
 header{
   padding: 44px 32px 28px;

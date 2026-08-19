@@ -10,7 +10,7 @@ function money(cents, currencySymbol) {
   return currencySymbol + Math.round(cents * 100) / 100;
 }
  
-const CURRENCY_SYMBOL = "₱"; // PH only now
+const CURRENCY_SYMBOL = "₱";
  
 function escapeHtml(str) {
   const d = document.createElement("div");
@@ -39,46 +39,6 @@ function renderSkeleton(n = 20) {
   html += `</div>`;
  
   content.innerHTML = html;
-}
- 
-function buildTicker(items) {
-  const track =
-    document.getElementById("tickerTrack");
- 
-  const top = [...items]
-    .sort(
-      (a, b) =>
-        b.discount_percent -
-        a.discount_percent
-    )
-    .slice(0, 20);
- 
-  if (!top.length) {
-    track.innerHTML = `
-      <span class="tick">
-        <span class="pct">···</span>
-        no deals
-      </span>
-    `;
-    return;
-  }
- 
-  const makeTicks = () =>
-    top
-      .map(
-        g => `
-          <span class="tick">
-            <span class="pct">
-              -${g.discount_percent}%
-            </span>
-            <b>${escapeHtml(g.name)}</b>
-          </span>
-        `
-      )
-      .join("");
- 
-  track.innerHTML =
-    makeTicks() + makeTicks();
 }
  
 function cardHtml(g, sym) {
@@ -253,15 +213,6 @@ async function load(page = 1) {
  
   renderSkeleton();
  
-  document.getElementById(
-    "tickerTrack"
-  ).innerHTML = `
-    <span class="tick">
-      <span class="pct">···</span>
-      loading market feed
-    </span>
-  `;
- 
   try {
  
     const data =
@@ -304,8 +255,6 @@ async function load(page = 1) {
       Number(data.page) || page;
  
     renderGrid();
- 
-    buildTicker(allDeals);
  
     renderPagination();
  
