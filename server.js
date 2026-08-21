@@ -142,7 +142,7 @@ function parseSteamResults(html) {
           : ""
       );
 
-    const reviewMatch = row.match(
+    const ratingMatch = row.match(
       /<div[^>]*class="[^"]*\bsearch_reviewscore responsive_secondrow\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
     );
 
@@ -151,15 +151,8 @@ function parseSteamResults(html) {
       review_percent,
       review_count
     } = parseReviewSpan(
-      reviewMatch ? reviewMatch[1] : ""
+      ratingMatch ? ratingMatch[1] : ""
     );
-
-    const userReview =
-      parsePrice(
-        reviewMatch
-          ? decodeHtml(reviewMatch[1])
-          : ""
-      );
 
     const urlMatch =
       row.match(/<a\b[^>]*href="([^"]+)"/i);
