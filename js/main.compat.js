@@ -1,43 +1,19 @@
-let allDeals = [];
-let currentPage = 1;
-let totalPages = 1;
-let totalDeals = 0;
-const PER_PAGE = 20;
 function money(cents, currencySymbol) {
   if (cents === 0) return "FREE";
   return currencySymbol + (Math.round(cents) / 100).toFixed(2);
 }
-const CURRENCY_SYMBOL = "₱";
 function escapeHtml(str) {
-  const d = document.createElement("div");
-  d.textContent = str ?? "";
-  return d.innerHTML;
+  const contentHTML = document.createElement("div");
+  contentHTML.textContent = str ?? "";
+  return contentHTML.innerHTML;
 }
-function renderSkeleton(n = 20) {
-  const content = document.getElementById("content");
-  let html = `<div class="grid">`;
-  for (let i = 0; i < n; i++) {
-    html += `
-      <div class="skeleton">
-        <div class="imgwrap"></div>
-        <div class="body">
-          <div class="bar" style="width:90%"></div>
-          <div class="bar" style="width:60%"></div>
-          <div class="bar" style="width:40%"></div>
-        </div>
-      </div>
-    `;
-  }
-  html += `</div>`;
-  content.innerHTML = html;
-}
-function cardHtml(g, sym) {
-  const img = g.large_capsule_image || g.header_image || g.small_capsule_image || "";
-  const finalIsFree = g.final_price === 0;
+function cardHtml(game, priceSymbol) {
+  const img = game.large_capsule_image || game.header_image || game.small_capsule_image || "";
+  const finalIsFree = game.final_price === 0;
   return `
     <a
       class="card"
-      href="https://store.steampowered.com/app/${g.id}"
+      href="https://store.steampowered.com/app/${game.id}"
       target="_blank"
       rel="noopener"
     >
@@ -45,12 +21,12 @@ function cardHtml(g, sym) {
  
         <img
           src="${escapeHtml(img)}"
-          alt="${escapeHtml(g.name)}"
+          alt="${escapeHtml(game.name)}"
           loading="lazy"
         />
  
         <div class="badge">
-          -${g.discount_percent}%
+          -${game.discount_percent}%
         </div>
  
       </div>
@@ -58,24 +34,26 @@ function cardHtml(g, sym) {
       <div class="body">
  
         <div class="title">
-          ${escapeHtml(g.name)}
+          ${escapeHtml(game.name)}
         </div>
-        
+        <div class="review">
+          ${escapeHtml(game.descMatch)}
+        </div>
         <div class="priceline">
  
           <span class="orig">
-            ${money(g.original_price, sym)}
+            ${money(game.original_price, priceSymbol)}
           </span>
  
           <span class="final ${finalIsFree ? "free" : ""}">
-            ${money(g.final_price, sym)}
+            ${money(game.final_price, priceSymbol)}
           </span>
  
         </div>
  
         <div class="meter">
           <i
-            style="width:${Math.min(g.discount_percent, 100)}%"
+            style="width:${Math.min(game.discount_percent, 100)}%"
           ></i>
         </div>
  
@@ -83,18 +61,6 @@ function cardHtml(g, sym) {
     </a>
   `;
 }
-
-/*
- * Fetch from our Node backend.
- *
- * Browser:
- *
- * /api/steam
- *
- * Node:
- *
- * Steam
- */
 async function fetchDeals({
   cc,
   page = 1,
@@ -117,25 +83,15 @@ async function fetchDeals({
   }
   return data;
 }
-
-/*
- * Render exactly what the backend sent.
- *
- * IMPORTANT:
- * We do NOT filter or sort here.
- *
- * The server handles:
- * - search
- * - sorting
- * - pagination
- */
+const CURRENCY_SYMBOL = "₱";
+let allDeals = [];
 function renderGrid() {
   const sym = CURRENCY_SYMBOL;
   const content = document.getElementById("content");
   if (!allDeals.length) {
     content.innerHTML = `
       <div class="state">
-        No titles match your search.
+        No titles match your search or is not on sale.
       </div>
     `;
     return;
@@ -146,16 +102,34 @@ function renderGrid() {
     </div>
   `;
 }
-
-/*
- * Main AJAX loader.
- */
+function loadingCards(n = 20) {
+  const content = document.getElementById("content");
+  let html = `<div class="grid">`;
+  for (let i = 0; i < n; i++) {
+    html += `
+    <div class="skeleton">
+      <div class="imgwrap"></div>
+      <div class="body">
+        <div class="bar" style="width:90%"></div>
+        <div class="bar" style="width:60%"></div>
+        <div class="bar" style="width:40%"></div>
+      </div>
+    </div>
+  `;
+  }
+  html += `</div>`;
+  content.innerHTML = html;
+}
+const PER_PAGE = 20;
+let currentPage = 1;
+let totalPages = 1;
+let totalDeals = 0;
 async function load(page = 1) {
   const cc = "ph";
   const sort = document.getElementById("sortSelect").value;
   const search = document.getElementById("searchBox").value.trim();
   currentPage = page;
-  renderSkeleton();
+  loadingCards();
   try {
     const data = await fetchDeals({
       cc,
@@ -163,20 +137,7 @@ async function load(page = 1) {
       sort,
       search
     });
-
-    /*
-     * Backend response:
-     *
-     * {
-     *   page,
-     *   per_page,
-     *   total,
-     *   total_pages,
-     *   deals
-     * }
-     */
-
-    allDeals = data.deals || [];
+    allDeals = data.deals ?? [];
     console.log("STEAM API RESPONSE:", data);
     console.log("DEALS:", allDeals);
     console.log("DEAL COUNT:", allDeals.length);
@@ -211,19 +172,11 @@ async function load(page = 1) {
     document.getElementById("countPill").innerHTML = `<b>0</b> deals`;
   }
 }
-
-/*
- * AJAX pagination.
- */
 function renderPagination() {
   const content = document.getElementById("content");
-
-  /*
-   * Remove old pagination.
-   */
-  const old = document.getElementById("pagination");
-  if (old) {
-    old.remove();
+  const oldPagination = document.getElementById("pagination");
+  if (oldPagination) {
+    oldPagination.remove();
   }
   if (totalPages <= 1) {
     return;
@@ -244,9 +197,9 @@ function renderPagination() {
     button.textContent = label;
     button.disabled = disabled;
     button.style.cssText = `
-      background:${active ? "var(--red)" : disabled ? "var(--bg-raised)" : "var(--card)"};
+      background:${active ? "var(--active-button)" : disabled ? "var(--bg-raised)" : "var(--card)"};
  
-      border:1px solid ${active ? "var(--red)" : "var(--line)"};
+      border:1px solid ${active ? "var(--active-line)" : "var(--line)"};
  
       color:${active ? "#fff" : disabled ? "var(--text-dim)" : "var(--text)"};
  
@@ -275,15 +228,7 @@ function renderPagination() {
     }
     pagination.appendChild(button);
   }
-
-  /*
-   * Previous
-   */
   addButton("← Prev", currentPage - 1, currentPage === 1);
-
-  /*
-   * Calculate visible page numbers.
-   */
   let start = Math.max(1, currentPage - 2);
   let end = Math.min(totalPages, currentPage + 2);
 
@@ -302,17 +247,9 @@ function renderPagination() {
       pagination.appendChild(dots);
     }
   }
-
-  /*
-   * Main page numbers.
-   */
   for (let page = start; page <= end; page++) {
     addButton(String(page), page, false, page === currentPage);
   }
-
-  /*
-   * Always show last page.
-   */
   if (end < totalPages) {
     if (end < totalPages - 1) {
       const dots = document.createElement("span");
@@ -325,28 +262,12 @@ function renderPagination() {
     }
     addButton(String(totalPages), totalPages, false, currentPage === totalPages);
   }
-
-  /*
-   * Next
-   */
   addButton("Next →", currentPage + 1, currentPage === totalPages);
   content.appendChild(pagination);
 }
-
-/*
- * Sort change.
- *
- * Immediately reload page 1.
- */
 document.getElementById("sortSelect").addEventListener("change", () => {
   load(1);
 });
-
-/*
- * Search.
- *
- * AJAX after 350ms.
- */
 let searchTimer;
 document.getElementById("searchBox").addEventListener("input", () => {
   clearTimeout(searchTimer);
@@ -354,8 +275,4 @@ document.getElementById("searchBox").addEventListener("input", () => {
     load(1);
   }, 350);
 });
-
-/*
- * Initial load.
- */
 load(1);

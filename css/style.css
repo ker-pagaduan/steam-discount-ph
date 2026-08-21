@@ -4,6 +4,8 @@
   --card: #141a22;
   --card-hover: #1a212b;
   --line: #232b36;
+  --active-button: #0A0E13;
+  --active-line: #232b36;
   --text: #e7ecf2;
   --text-dim: #8b97a6;
   --red: #ff0000;
@@ -23,6 +25,8 @@ html,body{
 }
 
 ::selection{ background: var(--red); color:#fff; }
+
+
 
 /* ---------- Header ---------- */
 header{
@@ -166,6 +170,11 @@ main{
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.review{
+  font-size: 12px;
+  text-transform: capitalize;
+  color: var(--green);
 }
 .priceline{
   margin-top:auto;

@@ -1,6 +1,11 @@
 require('dotenv').config();
-const { loadRegionCacheFromKV, saveRegionCacheToKV, regionCache, inFlightCrawls } = require('./js/cache.js');
 
+const {
+  loadRegionCacheFromKV,
+  saveRegionCacheToKV,
+  regionCache,
+  inFlightCrawls
+} = require('./js/cache.js');
 
 const http = require("http");
 const fs = require("fs");
@@ -9,16 +14,10 @@ const path = require("path");
 const PORT = process.env.PORT || 3000;
 const SITE_PER_PAGE = 20;
 
-/*
- * Periodically scrape and crawl steam api
- */
-
 const CSS_DIR = path.join(__dirname, "css");
 const JS_DIR = path.join(__dirname, "js");
 
 const STEAM_CC = "ph";
-
-
 
 function sleep(ms) {
   return new Promise(
@@ -38,6 +37,20 @@ function decodeHtml(str = "") {
     );
 }
 
+function parseReviewSpan(spanHtml) {
+  if (!spanHtml) return { review_desc: "", review_percent: 0, review_count: 0 };
+  const tooltipMatch = spanHtml.match(/data-tooltip-html="([^"]*)"/i);
+  const tooltip = tooltipMatch ? decodeHtml(tooltipMatch[1]) : "";
+  const descMatch = tooltip.match(/^([^<]+)/);
+  const pctMatch = tooltip.match(/(\d+)%/);
+  const countMatch = tooltip.match(/of the ([\d,]+) user reviews/i);
+  return {
+    review_desc: descMatch ? descMatch[1].trim() : "",
+    review_percent: pctMatch ? Number(pctMatch[1]) : 0,
+    review_count: countMatch ? Number(countMatch[1].replace(/,/g, "")) : 0,
+  };
+}
+
 function parsePrice(str = "") {
   const cleaned = str
     .replace(/[^\d.,]/g, "")
@@ -52,12 +65,6 @@ function parsePrice(str = "") {
   return Math.round(value * 100);
 }
 
-/*
- * Parses any chunk of HTML containing Steam
- * "search_result_row" anchors — works equally well on a
- * full rendered search page OR on the results_html
- * fragment returned by Steam's AJAX search endpoint.
- */
 function parseSteamResults(html) {
   const deals = [];
 
@@ -135,6 +142,21 @@ function parseSteamResults(html) {
           : ""
       );
 
+    const {
+      review_desc,
+      review_percent,
+      review_count
+    } = parseReviewSpan(
+      userMatch ? userMatch[1] : ""
+    );
+
+    const userReview =
+      parsePrice(
+        userMatch
+          ? decodeHtml(userMatch[1])
+          : ""
+      );
+
     const urlMatch =
       row.match(/<a\b[^>]*href="([^"]+)"/i);
 
@@ -152,6 +174,9 @@ function parseSteamResults(html) {
       large_capsule_image: image,
       header_image: image,
       small_capsule_image: image,
+      review_desc,
+      review_percent,
+      review_count,
       url,
     });
   }
@@ -210,25 +235,6 @@ async function steamFetch(url) {
   return response;
 }
 
-/*
- * =====================================================
- * CRAWLER
- * =====================================================
- */
-
-/*
- * Preferred path: Steam's own AJAX search endpoint (the
- * one the store page itself calls for infinite scroll).
- * Supports direct offset/count and returns an exact
- * total_count for the filtered query.
- *
- * NOTE: this is not a documented/official Steam API — it
- * was found via community reverse-engineering of the
- * storefront's own network calls. It could change or
- * break without notice, which is exactly why the crawler
- * below falls back to full-page scraping if this stops
- * working, rather than the whole app depending on it.
- */
 async function fetchSteamSearchJsonPage({
   cc,
   start,
@@ -241,7 +247,7 @@ async function fetchSteamSearchJsonPage({
   params.set("start", String(start));
   params.set("count", String(count));
   params.set("sort_by", "_ASC");
-  params.set("sort_by", "_DESC");
+  params.set("order", "_DESC");
   params.set("specials", "1");
   params.set("infinite", "1");
   params.set("json", "1");
@@ -270,11 +276,6 @@ async function fetchSteamSearchJsonPage({
   };
 }
 
-/*
- * Fallback path: scrape the full rendered search page,
- * same as the original approach. Used only if the AJAX
- * JSON endpoint fails on the very first page of a crawl.
- */
 async function fetchSteamFullPage({
   cc,
   page,
@@ -307,14 +308,6 @@ async function fetchSteamFullPage({
 const CRAWL_PAGE_SIZE = 100;
 const CRAWL_FETCH_DELAY_MS = 3000;
 
-/*
- * A 429 from Steam means the IP is being rate limited —
- * that applies to every region and every endpoint, not
- * just the one request that got it. Rather than let each
- * region's crawl independently keep hammering Steam (and
- * making the block worse/longer), a 429 anywhere pauses
- * ALL crawling until this cooldown expires.
- */
 const DEFAULT_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
 let steamCooldownUntil = 0;
 
@@ -358,20 +351,6 @@ function enterCooldown(retryAfterHeader) {
   }
 }
 
-/*
- * Crawls one region's full set of discounted listings in
- * the background and returns the accumulated result. Does
- * NOT touch the shared cache directly — the caller decides
- * whether/how to store it, so a failed or empty crawl can
- * never clobber a previously-good cache.
- *
- * No artificial page/row cap — this runs in the
- * background on a timer, not on the request path, so
- * there's no need to bound how deep it goes. It stops
- * purely on natural signals from Steam: reaching its
- * reported total_count, or getting a page back with zero
- * rows.
- */
 async function crawlRegion(cc) {
 
   let accumulated = [];
@@ -400,41 +379,35 @@ async function crawlRegion(cc) {
     } catch (error) {
 
       if (error.status === 429) {
-        // Rate limited. Don't bother with the full-page
-        // fallback — same IP, same block, it would just
-        // fail too. Stop immediately and pause ALL
-        // crawling, not just this region.
         enterCooldown(error.retryAfter);
+
         console.warn(
           `[crawl] ${cc}: rate limited, stopping crawl `
           + `(had ${accumulated.length} deals so far)`
         );
+
         complete = false;
         break;
       }
 
       if (useJson && start === 0) {
-        // JSON endpoint failed right out of the gate —
-        // fall back to full-page scraping for this whole
-        // crawl instead of giving up entirely.
+
         console.warn(
           `[crawl] ${cc}: AJAX JSON endpoint failed `
           + `(${error.message}), falling back to full-page scrape`
         );
+
         useJson = false;
         continue;
       }
 
-      // Failed partway through — stop here and keep
-      // whatever we've already gathered this cycle, but
-      // mark it clearly as INCOMPLETE. This is not the
-      // same as reaching the real end of the results.
       console.warn(
         `[crawl] ${cc}: stopping EARLY (incomplete) after `
         + `failure (${error.message}) — accumulated `
         + `${accumulated.length} deals so far, Steam `
         + `reported ${steamTotal} total matching`
       );
+
       complete = false;
       break;
     }
@@ -455,7 +428,7 @@ async function crawlRegion(cc) {
 
     if (rawRowCount === 0) {
       complete = true;
-      break; // genuinely out of results
+      break;
     }
 
     if (useJson) {
@@ -489,11 +462,6 @@ async function crawlRegion(cc) {
   };
 }
 
-/*
- * Runs (or joins an in-progress) crawl for a region, and
- * updates the cache on success. Never overwrites a good
- * cache with an empty/failed result.
- */
 async function refreshRegion(cc) {
 
   if (isInCooldown()) {
@@ -532,12 +500,6 @@ async function refreshRegion(cc) {
   return crawlPromise;
 }
 
-/*
- * Used by the request path. Returns cached data
- * immediately if we have any (even if stale) — only
- * blocks on a live crawl the very first time a region is
- * ever requested with nothing on disk yet.
- */
 async function getRegionData(cc) {
 
   if (regionCache.has(cc)) {
@@ -562,12 +524,6 @@ async function refreshPhRegion() {
   }
 }
 
-/*
- * =====================================================
- * HTTP SERVER
- * =====================================================
- */
-
 const server = http.createServer(
   async (req, res) => {
 
@@ -580,8 +536,6 @@ const server = http.createServer(
           `http://localhost:${PORT}`
         );
 
-        // Single-region app — always PH, regardless of
-        // any ?cc= the client might still send.
         const cc = STEAM_CC;
 
         const requestedPage =
@@ -656,6 +610,13 @@ const server = http.createServer(
               a.final_price - b.final_price
           );
 
+        } else if (sort === "review-asc") {
+
+          deals.sort(
+            (b, a) =>
+              a.review_count - b.review_count
+          );
+
         } else if (sort === "name-asc") {
 
           deals.sort((a, b) =>
@@ -695,11 +656,6 @@ const server = http.createServer(
             regionData.updatedAt
           ).toISOString(),
 
-          // False if the background crawl that produced
-          // this cache stopped early due to a fetch
-          // failure partway through — meaning `total`
-          // may be an UNDERCOUNT of what's actually on
-          // sale right now, not the true full picture.
           data_complete:
             regionData.complete !== false,
 
@@ -768,64 +724,59 @@ const server = http.createServer(
     }
 
     if (req.url === "/css/style.css") {
-  const cssPath = path.join(CSS_DIR, "style.css");
+      const cssPath = path.join(CSS_DIR, "style.css");
 
-  fs.readFile(cssPath, "utf8", (err, css) => {
-    if (err) {
-      res.writeHead(404, {
-        "Content-Type": "text/plain"
+      fs.readFile(cssPath, "utf8", (err, css) => {
+
+        if (err) {
+          res.writeHead(404, {
+          "Content-Type": "text/plain"
+          });
+
+          res.end("CSS file not found");
+          return;
+        }
+
+        res.writeHead(200, {
+          "Content-Type": "text/css"
+        });
+
+        res.end(css);
       });
 
-      res.end("CSS file not found");
       return;
     }
 
-    res.writeHead(200, {
-      "Content-Type": "text/css"
-    });
+    if (req.url === "/js/main.compat.js") {
+      const jsPath = path.join(JS_DIR, "main.compat.js");
 
-    res.end(css);
-  });
+      fs.readFile(jsPath, "utf8", (err, js) => {
 
-  return;
-}
+      if (err) {
+        res.writeHead(404, {
+          "Content-Type": "text/plain"
+        });
 
-if (req.url === "/js/main.compat.js") {
-  const jsPath = path.join(JS_DIR, "main.compat.js");
+        res.end("JS file not found");
+        return;
+      }
 
-  fs.readFile(jsPath, "utf8", (err, js) => {
-    if (err) {
-      res.writeHead(404, {
-        "Content-Type": "text/plain"
+      res.writeHead(200, {
+        "Content-Type": "application/javascript"
       });
 
-      res.end("JS file not found");
+        res.end(js);
+
+      });
+
       return;
+
     }
-
-    res.writeHead(200, {
-      "Content-Type": "application/javascript"
-    });
-
-    res.end(js);
-
-  });
-
-  return;
-
-  }
-
 
     res.writeHead(404);
     res.end("Not found");
   }
 );
-
-/*
- * =====================================================
- * STARTUP
- * =====================================================
- */
 
 require('dotenv').config();
 
