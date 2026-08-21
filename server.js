@@ -41,11 +41,11 @@ function parseReviewSpan(spanHtml) {
   if (!spanHtml) return { review_rating: "", review_percent: 0, review_count: 0 };
   const tooltipMatch = spanHtml.match(/data-tooltip-html="([^"]*)"/i);
   const tooltip = tooltipMatch ? decodeHtml(tooltipMatch[1]) : "";
-  const descMatch = tooltip.match(/^([^<]+)/);
+  const reviewMatch = tooltip.match(/^([^<]+)/);
   const pctMatch = tooltip.match(/(\d+)%/);
   const countMatch = tooltip.match(/of the ([\d,]+) user reviews/i);
   return {
-    review_rating: descMatch ? descMatch[1].trim() : "",
+    review_rating: reviewMatch ? reviewMatch[1].trim() : "",
     review_percent: pctMatch ? Number(pctMatch[1]) : 0,
     review_count: countMatch ? Number(countMatch[1].replace(/,/g, "")) : 0,
   };
@@ -142,18 +142,22 @@ function parseSteamResults(html) {
           : ""
       );
 
+    const reviewMatch = row.match(
+      /<div[^>]*class="[^"]*\bsearch_reviewscore responsive_secondrow\b[^"]*"[^>]*>([\s\S]*?)<\/div>/i
+    );
+
     const {
       review_rating,
       review_percent,
       review_count
     } = parseReviewSpan(
-      userMatch ? userMatch[1] : ""
+      reviewMatch ? reviewMatch[1] : ""
     );
 
     const userReview =
       parsePrice(
-        userMatch
-          ? decodeHtml(userMatch[1])
+        reviewMatch
+          ? decodeHtml(reviewMatch[1])
           : ""
       );
 
