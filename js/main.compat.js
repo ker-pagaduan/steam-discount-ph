@@ -37,7 +37,7 @@ function cardHtml(game, priceSymbol) {
           ${escapeHtml(game.name)}
         </div>
         <div class="review">
-          ${escapeHtml(game.descMatch)}
+          ${escapeHtml(game.review_rating)}
         </div>
         <div class="priceline">
  

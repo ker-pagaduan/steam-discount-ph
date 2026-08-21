@@ -38,14 +38,14 @@ function decodeHtml(str = "") {
 }
 
 function parseReviewSpan(spanHtml) {
-  if (!spanHtml) return { review_desc: "", review_percent: 0, review_count: 0 };
+  if (!spanHtml) return { review_rating: "", review_percent: 0, review_count: 0 };
   const tooltipMatch = spanHtml.match(/data-tooltip-html="([^"]*)"/i);
   const tooltip = tooltipMatch ? decodeHtml(tooltipMatch[1]) : "";
   const descMatch = tooltip.match(/^([^<]+)/);
   const pctMatch = tooltip.match(/(\d+)%/);
   const countMatch = tooltip.match(/of the ([\d,]+) user reviews/i);
   return {
-    review_desc: descMatch ? descMatch[1].trim() : "",
+    review_rating: descMatch ? descMatch[1].trim() : "",
     review_percent: pctMatch ? Number(pctMatch[1]) : 0,
     review_count: countMatch ? Number(countMatch[1].replace(/,/g, "")) : 0,
   };
@@ -143,7 +143,7 @@ function parseSteamResults(html) {
       );
 
     const {
-      review_desc,
+      review_rating,
       review_percent,
       review_count
     } = parseReviewSpan(
@@ -174,7 +174,7 @@ function parseSteamResults(html) {
       large_capsule_image: image,
       header_image: image,
       small_capsule_image: image,
-      review_desc,
+      review_rating,
       review_percent,
       review_count,
       url,
